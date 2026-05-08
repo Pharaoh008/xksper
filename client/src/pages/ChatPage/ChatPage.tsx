@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useLocation } from 'react-router-dom';
 import { useTypewriter } from '@/hooks/useTypewriter';
-import { Send, Loader2, Bot, User, BookOpen, Wrench, FileText, ChevronDown, ChevronRight, Database, ListTodo } from 'lucide-react';
+import { Send, Loader2, Bot, User, BookOpen, Wrench, FileText, ChevronDown, ChevronRight, Database, ListTodo, Sparkles, Cpu, Layers3 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Streamdown } from '@/components/ui/streamdown';
@@ -37,6 +38,10 @@ const ChatPage: React.FC = () => {
   const [dataSourcesExpanded, setDataSourcesExpanded] = useState(false);
   const { knowledgeBases, tools, dataSources } = useMentionResources();
   const [currentMentions, setCurrentMentions] = useState<Array<{ type: 'knowledge' | 'tool' | 'datasource'; id: string; name: string }>>([]);
+  const selectedModelName = availableModels.find((model) => model.id === selectedModel)?.name || selectedModel || '未选择模型';
+  const selectedKnowledgeCount = currentMentions.filter((mention) => mention.type === 'knowledge').length;
+  const selectedToolCount = currentMentions.filter((mention) => mention.type === 'tool').length;
+  const selectedDataSourceCount = currentMentions.filter((mention) => mention.type === 'datasource').length;
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -587,15 +592,60 @@ const ChatPage: React.FC = () => {
   };
 
   return (
-    <div className="flex flex-col h-[calc(100vh-8rem)] overflow-hidden">
+    <div className="flex h-[calc(100vh-7rem)] flex-col overflow-hidden">
+      <div className="mb-4 flex flex-col gap-3 border-b border-border pb-4 lg:flex-row lg:items-center lg:justify-between">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <h1 className="text-xl font-semibold text-foreground">多模型对话工作台</h1>
+            <Badge className={agentMode ? 'bg-primary text-primary-foreground' : 'bg-accent text-accent-foreground'}>
+              {agentMode ? 'LangGraph ReAct' : 'LLM'}
+            </Badge>
+          </div>
+          <div className="mt-1 flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
+            <span className="inline-flex items-center gap-1.5">
+              <Cpu className="h-3.5 w-3.5" />
+              {selectedModelName}
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <Layers3 className="h-3.5 w-3.5" />
+              知识库 {selectedKnowledgeCount} / 工具 {selectedToolCount} / 数据源 {selectedDataSourceCount}
+            </span>
+          </div>
+        </div>
+        <div className="grid grid-cols-3 gap-2 text-xs">
+          <div className="rounded-md border border-border bg-card px-3 py-2 shadow-sm">
+            <div className="text-muted-foreground">可用模型</div>
+            <div className="font-mono text-base font-semibold text-foreground">{availableModels.length}</div>
+          </div>
+          <div className="rounded-md border border-border bg-card px-3 py-2 shadow-sm">
+            <div className="text-muted-foreground">可引用资源</div>
+            <div className="font-mono text-base font-semibold text-foreground">{knowledgeBases.length + tools.length + dataSources.length}</div>
+          </div>
+          <div className="rounded-md border border-border bg-card px-3 py-2 shadow-sm">
+            <div className="text-muted-foreground">当前上下文</div>
+            <div className="font-mono text-base font-semibold text-foreground">{currentMentions.length}</div>
+          </div>
+        </div>
+      </div>
       {/* 对话展示区 */}
-      <ScrollArea className="flex-1 h-full overflow-hidden mb-4 pr-4">
-        <div className="space-y-4">
+      <ScrollArea className="mb-4 h-full flex-1 overflow-hidden pr-4">
+        <div className="mx-auto max-w-5xl space-y-4">
           {messages.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-64 text-muted-foreground">
-              <Bot className="h-12 w-12 mb-4 text-primary/50" />
-              <p className="text-lg font-medium">开始对话</p>
-              <p className="text-sm mt-1">输入消息或上传图片开始对话</p>
+            <div className="flex min-h-[360px] flex-col items-center justify-center rounded-lg border border-dashed border-border bg-card px-6 text-center shadow-sm">
+              <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-md bg-accent text-accent-foreground">
+                <Sparkles className="h-6 w-6" />
+              </div>
+              <p className="text-lg font-semibold text-foreground">开始一次高质量对话</p>
+              <p className="mt-2 max-w-xl text-sm leading-relaxed text-muted-foreground">
+                选择模型，引用知识库或工具，然后让 Agent 帮你完成分析、写作、检索和执行。
+              </p>
+              <div className="mt-5 flex flex-wrap justify-center gap-2">
+                {['总结这份资料的关键结论', '基于知识库生成行动方案', '调用工具检查最新状态'].map((prompt) => (
+                  <Button key={prompt} type="button" variant="outline" size="sm" onClick={() => setInputValue(prompt)}>
+                    {prompt}
+                  </Button>
+                ))}
+              </div>
             </div>
           ) : (
             messages.map((message) => (
@@ -678,7 +728,8 @@ const ChatPage: React.FC = () => {
       </ScrollArea>
 
       {/* 输入区 */}
-      <div className="shrink-0 pt-4 border-t border-border bg-background">
+      <div className="shrink-0 border-t border-border bg-background pt-4">
+        <div className="mx-auto max-w-5xl">
         <ChatInput
           value={inputValue}
           onChange={setInputValue}
@@ -899,6 +950,7 @@ const ChatPage: React.FC = () => {
             </div>
           )}
         </ChatInput>
+        </div>
       </div>
     </div>
   );

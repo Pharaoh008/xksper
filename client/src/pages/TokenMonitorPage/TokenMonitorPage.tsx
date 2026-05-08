@@ -48,12 +48,12 @@ const CHART_COLORS = [
 
 // 统计卡片配色
 const STAT_CARD_STYLES = [
-  { bg: 'bg-gradient-to-br from-blue-500 to-blue-600', iconBg: 'bg-blue-400/30', iconColor: 'text-white' },
-  { bg: 'bg-gradient-to-br from-emerald-500 to-emerald-600', iconBg: 'bg-emerald-400/30', iconColor: 'text-white' },
-  { bg: 'bg-gradient-to-br from-violet-500 to-violet-600', iconBg: 'bg-violet-400/30', iconColor: 'text-white' },
-  { bg: 'bg-gradient-to-br from-amber-500 to-amber-600', iconBg: 'bg-amber-400/30', iconColor: 'text-white' },
-  { bg: 'bg-gradient-to-br from-rose-500 to-rose-600', iconBg: 'bg-rose-400/30', iconColor: 'text-white' },
-  { bg: 'bg-gradient-to-br from-cyan-500 to-cyan-600', iconBg: 'bg-cyan-400/30', iconColor: 'text-white' },
+  { bg: 'bg-card', iconBg: 'bg-primary/10', iconColor: 'text-primary' },
+  { bg: 'bg-card', iconBg: 'bg-success/10', iconColor: 'text-success' },
+  { bg: 'bg-card', iconBg: 'bg-accent', iconColor: 'text-accent-foreground' },
+  { bg: 'bg-card', iconBg: 'bg-warning/15', iconColor: 'text-warning' },
+  { bg: 'bg-card', iconBg: 'bg-error/10', iconColor: 'text-error' },
+  { bg: 'bg-card', iconBg: 'bg-primary/10', iconColor: 'text-primary' },
 ];
 
 const TokenMonitorPage: React.FC = () => {
@@ -489,22 +489,22 @@ const TokenMonitorPage: React.FC = () => {
   const StatCard = ({ icon: Icon, title, value, index, isCurrency }: StatCardProps) => {
     const style = STAT_CARD_STYLES[index % STAT_CARD_STYLES.length];
     return (
-      <Card className={`${style.bg} border-0 shadow-lg overflow-hidden`}>
+      <Card className={`${style.bg} overflow-hidden border-border shadow-sm`}>
         <CardContent className="p-5">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-white/80 text-sm font-medium mb-1">{title}</p>
-              <div className="text-2xl font-bold text-white font-mono">
+              <p className="mb-1 text-sm font-medium text-muted-foreground">{title}</p>
+              <div className="font-mono text-2xl font-bold text-foreground">
                 {loading ? (
-                  <span className="text-white/60">--</span>
+                  <span className="text-muted-foreground">--</span>
                 ) : isCurrency ? (
-                  <span className="text-emerald-300">¥{value}</span>
+                  <span className="text-success">¥{value}</span>
                 ) : (
                   value
                 )}
               </div>
             </div>
-            <div className={`w-12 h-12 ${style.iconBg} rounded-xl flex items-center justify-center`}>
+            <div className={`flex h-11 w-11 items-center justify-center rounded-md ${style.iconBg}`}>
               <Icon className={`h-6 w-6 ${style.iconColor}`} />
             </div>
           </div>
@@ -517,23 +517,32 @@ const TokenMonitorPage: React.FC = () => {
   const formatCurrency = (num: number) => num.toFixed(2);
 
   return (
-    <div className="p-6 max-w-[1600px] mx-auto">
+    <div className="space-y-6">
       {/* 页面标题 */}
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold text-gray-900">Token监控中心</h1>
-        <p className="text-gray-500 text-sm mt-1">多维度Token消耗统计与费用分析</p>
+      <div className="rounded-lg border border-border bg-card p-5 shadow-sm">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <h1 className="text-2xl font-bold text-foreground">Token 监控中心</h1>
+            <p className="mt-2 max-w-2xl text-sm leading-relaxed text-muted-foreground">
+              从人员、模型、Agent、Workflow 和组织维度追踪用量与费用，帮助管理员快速定位成本来源。
+            </p>
+          </div>
+          <Badge variant="outline" className="w-fit rounded-full border-primary/20 bg-accent text-accent-foreground">
+            数据周期：{formatDateRange()}
+          </Badge>
+        </div>
       </div>
 
       {/* 日期选择器 */}
-      <Card className="mb-6 border-gray-200 shadow-sm">
+      <Card className="border-border shadow-sm">
         <CardContent className="p-4">
           <div className="flex flex-wrap items-center gap-4">
             <div className="flex items-center gap-2">
-              <span className="text-sm text-gray-600 font-medium">日期范围:</span>
+              <span className="text-sm font-medium text-foreground">日期范围</span>
               <Popover open={datePickerOpen} onOpenChange={setDatePickerOpen}>
                 <PopoverTrigger asChild>
-                  <Button variant="outline" className="min-w-[180px] justify-start border-gray-300 hover:border-blue-400 hover:bg-blue-50">
-                    <CalendarIcon className="mr-2 h-4 w-4 text-blue-500" />
+                  <Button variant="outline" className="min-w-[180px] justify-start">
+                    <CalendarIcon className="mr-2 h-4 w-4 text-primary" />
                     {formatDateRange()}
                   </Button>
                 </PopoverTrigger>
@@ -557,20 +566,20 @@ const TokenMonitorPage: React.FC = () => {
               </Popover>
             </div>
             <div className="flex items-center gap-2">
-              <span className="text-sm text-gray-600 font-medium">快捷选择:</span>
+              <span className="text-sm font-medium text-foreground">快捷选择</span>
               <div className="flex gap-2">
                 {[
                   { label: '昨日', days: 0 },
-                  { label: '近7天', days: 7 },
-                  { label: '近30天', days: 30 },
-                  { label: '近90天', days: 90 },
+                  { label: '近 7 天', days: 7 },
+                  { label: '近 30 天', days: 30 },
+                  { label: '近 90 天', days: 90 },
                 ].map(({ label, days }) => (
                   <Button
                     key={days}
                     variant="outline"
                     size="sm"
                     onClick={() => handleQuickSelect(days)}
-                    className="border-gray-300 hover:border-blue-400 hover:bg-blue-50 hover:text-blue-600"
+                    className="hover:bg-accent hover:text-accent-foreground"
                   >
                     {label}
                   </Button>
@@ -582,7 +591,7 @@ const TokenMonitorPage: React.FC = () => {
       </Card>
 
       {/* 统计卡片 */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-6">
+      <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-6">
         <StatCard
           icon={HashIcon}
           title="总Token"
@@ -624,7 +633,7 @@ const TokenMonitorPage: React.FC = () => {
 
       {/* Tab切换 */}
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-        <TabsList className="mb-6 bg-gray-100 p-1">
+        <TabsList className="mb-6 h-auto flex-wrap justify-start bg-card p-1 shadow-sm">
           {[
             { value: 'overview', label: '📊 概览' },
             { value: 'users', label: '👤 人员' },
@@ -637,7 +646,7 @@ const TokenMonitorPage: React.FC = () => {
             <TabsTrigger
               key={value}
               value={value}
-              className="data-[state=active]:bg-white data-[state=active]:text-blue-600 data-[state=active]:shadow-sm"
+              className="data-[state=active]:bg-accent data-[state=active]:text-accent-foreground data-[state=active]:shadow-sm"
             >
               {label}
             </TabsTrigger>
