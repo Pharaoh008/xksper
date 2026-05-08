@@ -85,8 +85,10 @@ final class ApiController
 
             if (preg_match('#^/agents/([^/]+)/chat$#', $path, $m) && $method === 'POST') {
                 $agent = $this->store->find('agents', $m[1]) ?? [];
-                $result = $this->callChatModel($body['messages'] ?? [], (string)($agent['model'] ?? ''));
-                $this->json(['content' => $result['content'], 'toolCalls' => []]);
+                $this->agentChat(array_merge($body, [
+                    'agentId' => $m[1],
+                    'model' => (string)($agent['model'] ?? $body['model'] ?? ''),
+                ]));
             }
 
             if (preg_match('#^/agents/([^/]+)/execute$#', $path, $m) && $method === 'POST') {
@@ -261,7 +263,18 @@ final class ApiController
 
     private function chat(array $body): void
     {
-        $result = $this->callChatModel($body['messages'] ?? [], (string)($body['model'] ?? ''));
+        $messages = is_array($body['messages'] ?? null) ? $body['messages'] : [];
+        $mentions = is_array($body['mentions'] ?? null) ? $body['mentions'] : [];
+        if ($mentions) {
+            $query = $this->lastUserMessage($messages);
+            $threadId = (string)($body['conversationId'] ?? 'default-thread');
+            $resources = $this->agentResources($mentions, $query, $threadId, false);
+            $messages = array_merge([
+                ['role' => 'system', 'content' => $this->resourceSystemPrompt($resources)],
+            ], $messages);
+        }
+
+        $result = $this->callChatModel($messages, (string)($body['model'] ?? ''));
         $this->json([
             'id' => $this->id(),
             'role' => 'assistant',
@@ -276,7 +289,8 @@ final class ApiController
         $mentions = is_array($body['mentions'] ?? null) ? $body['mentions'] : [];
         $query = $this->lastUserMessage($messages);
         $threadId = (string)($body['conversationId'] ?? 'default-thread');
-        $resources = $this->agentResources($mentions, $query, $threadId);
+        $agent = trim((string)($body['agentId'] ?? '')) !== '' ? ($this->store->find('agents', (string)$body['agentId']) ?? []) : [];
+        $resources = $this->agentResources($mentions, $query, $threadId, true, $agent);
 
         $system = $this->agentSystemPrompt($resources, $threadId);
         $result = $this->callChatModel(array_merge([
@@ -296,6 +310,7 @@ final class ApiController
                 'knowledgeCount' => count($resources['knowledge']),
                 'skillCount' => count($resources['skills']),
                 'toolCount' => count($resources['tools']),
+                'mcpObservationCount' => count($resources['mcpObservations']),
                 'memoryCount' => count($resources['memory']),
             ],
         ]);
@@ -441,11 +456,23 @@ final class ApiController
         return $parts ?: '';
     }
 
-    private function agentResources(array $mentions, string $query, string $threadId): array
+    private function agentResources(array $mentions, string $query, string $threadId, bool $executeMcp = true, array $agent = []): array
     {
         $knowledgeIds = $this->mentionIds($mentions, 'knowledge');
         $toolIds = $this->mentionIds($mentions, 'tool');
         $dataSourceIds = $this->mentionIds($mentions, 'datasource');
+        foreach (($agent['knowledgeBase'] ?? []) as $id) {
+            if (is_string($id) && $id !== '') {
+                $knowledgeIds[] = $id;
+            }
+        }
+        foreach (($agent['tools'] ?? []) as $id) {
+            if (is_string($id) && $id !== '') {
+                $toolIds[] = $id;
+            }
+        }
+        $knowledgeIds = array_values(array_unique($knowledgeIds));
+        $toolIds = array_values(array_unique($toolIds));
         $toolRows = $this->selectedTools($toolIds);
 
         return [
@@ -453,6 +480,7 @@ final class ApiController
             'tools' => $this->toolManifests($toolRows),
             'skills' => $this->skillManifests($toolRows),
             'dataSources' => $this->selectedDataSources($dataSourceIds),
+            'mcpObservations' => $executeMcp ? $this->callMcpTools($toolIds ? $toolRows : [], $query) : [],
             'memory' => $this->agentMemory($threadId),
             'mentions' => $mentions,
         ];
@@ -599,6 +627,143 @@ final class ApiController
         return 'Available as a declared tool manifest; request explicit user confirmation before irreversible or paid actions.';
     }
 
+    private function callMcpTools(array $tools, string $query): array
+    {
+        $observations = [];
+        foreach ($tools as $tool) {
+            if ((string)($tool['type'] ?? '') !== 'mcp') {
+                continue;
+            }
+
+            $config = is_array($tool['configData'] ?? null) ? $tool['configData'] : [];
+            $url = trim((string)($config['url'] ?? ''));
+            if ($url === '') {
+                $observations[] = [
+                    'tool' => (string)($tool['name'] ?? 'MCP'),
+                    'status' => 'skipped',
+                    'message' => 'MCP URL is empty.',
+                ];
+                continue;
+            }
+
+            try {
+                $headers = $this->mcpHeaders($config);
+                $this->mcpJsonRpc($url, 'initialize', [
+                    'protocolVersion' => '2024-11-05',
+                    'capabilities' => new \stdClass(),
+                    'clientInfo' => ['name' => 'xksper-agent-harness', 'version' => '1.0.0'],
+                ], $headers);
+                $list = $this->mcpJsonRpc($url, 'tools/list', new \stdClass(), $headers);
+                $available = is_array($list['result']['tools'] ?? null) ? $list['result']['tools'] : [];
+                $selected = $this->selectMcpTool($available, $query);
+                if (!$selected) {
+                    $observations[] = [
+                        'tool' => (string)($tool['name'] ?? 'MCP'),
+                        'status' => 'listed',
+                        'availableTools' => array_map(fn ($row) => (string)($row['name'] ?? ''), $available),
+                        'message' => 'No callable MCP tool was selected.',
+                    ];
+                    continue;
+                }
+
+                $called = $this->mcpJsonRpc($url, 'tools/call', [
+                    'name' => (string)$selected['name'],
+                    'arguments' => $this->mcpArguments($selected, $query),
+                ], $headers);
+
+                $observations[] = [
+                    'tool' => (string)($tool['name'] ?? 'MCP'),
+                    'calledTool' => (string)$selected['name'],
+                    'status' => 'ok',
+                    'result' => $this->slice(json_encode($called['result'] ?? $called, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: '{}', 0, 6000),
+                ];
+            } catch (Throwable $error) {
+                $observations[] = [
+                    'tool' => (string)($tool['name'] ?? 'MCP'),
+                    'status' => 'error',
+                    'message' => $this->slice($error->getMessage(), 0, 800),
+                ];
+            }
+        }
+
+        return $observations;
+    }
+
+    private function mcpHeaders(array $config): array
+    {
+        $headers = [];
+        foreach (($config['headers'] ?? []) as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+            $key = trim((string)($row['key'] ?? ''));
+            $value = trim((string)($row['value'] ?? ''));
+            if ($key !== '' && $value !== '') {
+                $headers[] = $key . ': ' . $value;
+            }
+        }
+
+        return $headers;
+    }
+
+    private function mcpJsonRpc(string $url, string $method, mixed $params, array $headers): array
+    {
+        $body = [
+            'jsonrpc' => '2.0',
+            'id' => $this->id(),
+            'method' => $method,
+            'params' => $params,
+        ];
+        $response = $this->httpJson('POST', $url, $body, array_merge(['Accept: application/json, text/event-stream'], $headers));
+        if (isset($response['error'])) {
+            $message = is_array($response['error']) ? (string)($response['error']['message'] ?? json_encode($response['error'], JSON_UNESCAPED_UNICODE)) : (string)$response['error'];
+            throw new RuntimeException('MCP error: ' . $message);
+        }
+
+        return $response;
+    }
+
+    private function selectMcpTool(array $tools, string $query): ?array
+    {
+        $query = strtolower($query);
+        foreach ($tools as $tool) {
+            if (!is_array($tool)) {
+                continue;
+            }
+            $name = strtolower((string)($tool['name'] ?? ''));
+            $description = strtolower((string)($tool['description'] ?? ''));
+            if ($name !== '' && ($query === '' || str_contains($query, $name) || str_contains($description, 'search') || str_contains($description, 'query') || str_contains($description, 'read'))) {
+                return $tool;
+            }
+        }
+
+        return is_array($tools[0] ?? null) ? $tools[0] : null;
+    }
+
+    private function mcpArguments(array $tool, string $query): array
+    {
+        $schema = is_array($tool['inputSchema'] ?? null) ? $tool['inputSchema'] : [];
+        $properties = is_array($schema['properties'] ?? null) ? $schema['properties'] : [];
+        if (!$properties) {
+            return ['query' => $query, 'input' => $query];
+        }
+
+        $args = [];
+        foreach ($properties as $name => $property) {
+            $lower = strtolower((string)$name);
+            if (in_array($lower, ['query', 'q', 'search', 'keyword', 'keywords', 'input', 'prompt', 'text'], true)) {
+                $args[(string)$name] = $query;
+                continue;
+            }
+
+            if (is_array($property) && ($property['type'] ?? '') === 'string') {
+                $args[(string)$name] = $query;
+            }
+        }
+
+        return $args ?: ['query' => $query];
+    }
+
     private function agentSystemPrompt(array $resources, string $threadId): string
     {
         return implode("\n\n", [
@@ -608,6 +773,18 @@ final class ApiController
             'Reason privately. Do not expose hidden chain-of-thought. When useful, show a concise public plan, key evidence, and final answer.',
             'Thread ID: ' . $threadId,
             'Memory:' . "\n" . $this->formatContext($resources['memory']),
+            'Knowledge:' . "\n" . $this->formatContext($resources['knowledge']),
+            'Skills:' . "\n" . $this->formatContext($resources['skills']),
+            'Tool Manifest:' . "\n" . $this->formatContext($resources['tools']),
+            'MCP Observations:' . "\n" . $this->formatContext($resources['mcpObservations']),
+            'Data Sources:' . "\n" . $this->formatContext($resources['dataSources']),
+        ]);
+    }
+
+    private function resourceSystemPrompt(array $resources): string
+    {
+        return implode("\n\n", [
+            'Use the following local resources when answering. Prefer this context over guesses. If context is insufficient, say what is missing.',
             'Knowledge:' . "\n" . $this->formatContext($resources['knowledge']),
             'Skills:' . "\n" . $this->formatContext($resources['skills']),
             'Tool Manifest:' . "\n" . $this->formatContext($resources['tools']),
@@ -680,6 +857,23 @@ final class ApiController
         }
 
         $decoded = json_decode((string)$raw, true);
+        if (!is_array($decoded) && str_contains((string)$raw, 'data:')) {
+            foreach (preg_split('/\R/', (string)$raw) ?: [] as $line) {
+                $line = trim($line);
+                if (!str_starts_with($line, 'data:')) {
+                    continue;
+                }
+                $candidate = trim(substr($line, 5));
+                if ($candidate === '' || $candidate === '[DONE]') {
+                    continue;
+                }
+                $event = json_decode($candidate, true);
+                if (is_array($event)) {
+                    $decoded = $event;
+                    break;
+                }
+            }
+        }
         if ($status >= 400) {
             $message = is_array($decoded)
                 ? (string)($decoded['error']['message'] ?? $decoded['message'] ?? json_encode($decoded, JSON_UNESCAPED_UNICODE))
