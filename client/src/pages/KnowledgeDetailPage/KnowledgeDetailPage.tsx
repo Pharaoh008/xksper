@@ -27,10 +27,8 @@ import {
 } from '@/components/ui/dialog';
 import { toast } from 'sonner';
 import { logger } from '@lark-apaas/client-toolkit/logger';
-import { getDataloom } from '@lark-apaas/client-toolkit/dataloom';
 import * as XLSX from 'xlsx';
 import * as mammoth from 'mammoth';
-import { getDefaultBucketId } from '@lark-apaas/client-toolkit/tools/storage';
 import {
   getKnowledgeBase,
   getKnowledgeBaseDocuments,
@@ -165,7 +163,10 @@ const KnowledgeDetailPage: React.FC = () => {
     if (!file || !id) return;
 
     // 检查文件类型
-    if (!ACCEPTED_FILE_TYPES[file.type as keyof typeof ACCEPTED_FILE_TYPES]) {
+    const ext = file.name.split('.').pop()?.toLowerCase();
+    const supportedByExtension = ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'txt', 'md', 'markdown', 'png', 'jpg', 'jpeg', 'webp', 'gif'].includes(ext || '');
+
+    if (!ACCEPTED_FILE_TYPES[file.type as keyof typeof ACCEPTED_FILE_TYPES] && !supportedByExtension) {
       toast.error('不支持的文件格式，请上传 PDF、Word、Excel、TXT、Markdown 或图片文件');
       return;
     }
@@ -179,27 +180,15 @@ const KnowledgeDetailPage: React.FC = () => {
 
     setUploading(true);
     try {
-      const dataloom = await getDataloom();
-
-      // 上传文件到存储
-      const { data: uploadResult, error } = await dataloom
-        .storage
-        .from(await getDefaultBucketId())
-        .uploadFile(file);
-
-      if (error || !uploadResult) {
-        throw new Error('文件上传失败: ' + (error?.message || '未知错误'));
-      }
-
       // 提取文件内容
       const content = await extractFileContent(file);
 
       // 保存文档信息到知识库
       await uploadDocumentToKnowledgeBase(id, {
         name: file.name,
-        filePath: uploadResult.file_path,
+        filePath: `inline://${Date.now()}-${file.name}`,
         fileSize: file.size,
-        fileType: file.type,
+        fileType: file.type || ext || 'application/octet-stream',
         content,
       });
 

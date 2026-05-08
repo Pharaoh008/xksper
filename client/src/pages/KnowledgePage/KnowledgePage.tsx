@@ -39,6 +39,14 @@ import {
 } from '@/api';
 import type { KnowledgeBase, CreateKnowledgeBaseRequest, Organization } from '@shared/api.interface';
 
+const readKnowledgeFileContent = async (file: File): Promise<string | undefined> => {
+  const ext = file.name.split('.').pop()?.toLowerCase();
+  if (file.type.startsWith('text/') || ['txt', 'md', 'markdown', 'csv', 'json'].includes(ext || '')) {
+    return file.text();
+  }
+  return undefined;
+};
+
 const KnowledgePage: React.FC = () => {
   const navigate = useNavigate();
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([]);
@@ -170,23 +178,15 @@ const KnowledgePage: React.FC = () => {
       
       // 2. 如果有文件，上传到知识库
       if (uploadFile && kb.id) {
-        const dataloom = await import('@lark-apaas/client-toolkit/dataloom').then(m => m.getDataloom());
-        const { getDefaultBucketId } = await import('@lark-apaas/client-toolkit/tools/storage');
-        
-        const { data: uploadResult, error } = await dataloom
-          .storage
-          .from(await getDefaultBucketId())
-          .uploadFile(uploadFile);
-
-        if (error || !uploadResult) {
-          throw new Error('文件上传失败: ' + (error?.message || '未知错误'));
-        }
+        const content = await readKnowledgeFileContent(uploadFile);
+        const ext = uploadFile.name.split('.').pop()?.toLowerCase();
 
         await uploadDocumentToKnowledgeBase(kb.id, {
           name: uploadFile.name,
-          filePath: uploadResult.file_path,
+          filePath: `inline://${Date.now()}-${uploadFile.name}`,
           fileSize: uploadFile.size,
-          fileType: uploadFile.type,
+          fileType: uploadFile.type || ext || 'application/octet-stream',
+          content,
         });
       }
       

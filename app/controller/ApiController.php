@@ -131,7 +131,11 @@ final class ApiController
             }
 
             if (preg_match('#^/knowledge/([^/]+)/documents/([^/]+)$#', $path, $m) && $method === 'DELETE') {
-                $this->json(['success' => $this->store->delete('documents', $m[2])]);
+                $deleted = $this->store->delete('documents', $m[2]);
+                if ($deleted) {
+                    $this->refreshKnowledgeStats($m[1]);
+                }
+                $this->json(['success' => $deleted]);
             }
 
             if (preg_match('#^/knowledge/([^/]+)/folders/([^/]+)$#', $path, $m)) {
@@ -1199,6 +1203,7 @@ final class ApiController
         if ($method === 'POST') {
             $row = $this->document(array_merge($body, ['id' => $this->id(), 'knowledgeBaseId' => $knowledgeBaseId]));
             $this->store->upsert('documents', $row);
+            $this->refreshKnowledgeStats($knowledgeBaseId);
             $this->json(['id' => $row['id']]);
         }
 
@@ -1339,6 +1344,20 @@ final class ApiController
         return $this->timestamps($row + ['name' => 'Default Knowledge Base', 'description' => '', 'type' => 'local', 'documentCount' => 0, 'tokenCount' => 0]);
     }
 
+    private function refreshKnowledgeStats(string $knowledgeBaseId): void
+    {
+        $knowledge = $this->store->find('knowledge', $knowledgeBaseId);
+        if (!$knowledge) {
+            return;
+        }
+
+        $documents = array_values(array_filter($this->store->all('documents'), fn ($row) => ($row['knowledgeBaseId'] ?? '') === $knowledgeBaseId));
+        $knowledge['documentCount'] = count($documents);
+        $knowledge['tokenCount'] = array_sum(array_map(fn ($row) => (int)($row['tokenCount'] ?? 0), $documents));
+        $knowledge['updatedAt'] = $this->now();
+        $this->store->upsert('knowledge', $knowledge);
+    }
+
     private function tool(array $row): array
     {
         $row = $this->timestamps($row + ['name' => 'Default Tool', 'type' => 'mcp', 'description' => '', 'configData' => [], 'isActive' => true]);
@@ -1392,6 +1411,10 @@ final class ApiController
 
     private function document(array $row): array
     {
+        $content = (string)($row['content'] ?? '');
+        $length = function_exists('mb_strlen') ? mb_strlen($content) : strlen($content);
+        $row['tokenCount'] = (int)($row['tokenCount'] ?? ($content !== '' ? max(1, (int)ceil($length / 4)) : 0));
+        $row['filePath'] = (string)($row['filePath'] ?? ('inline://' . ($row['name'] ?? 'document.txt')));
         return $row + ['name' => 'document.txt', 'fileSize' => 0, 'fileType' => 'text/plain', 'status' => 'completed', 'tokenCount' => 0, 'createdAt' => $this->now()];
     }
 

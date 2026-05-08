@@ -6,6 +6,8 @@ namespace app\service;
 
 final class JsonStore
 {
+    private const STORE_KEY = 'xksper:json-store';
+
     private string $file;
     private array $data;
 
@@ -68,6 +70,11 @@ final class JsonStore
 
     private function load(): array
     {
+        $remote = $this->loadRemote();
+        if ($remote !== null) {
+            return $remote;
+        }
+
         if (is_file($this->file)) {
             $data = json_decode((string)file_get_contents($this->file), true);
             if (is_array($data)) {
@@ -120,6 +127,68 @@ final class JsonStore
 
     private function save(): void
     {
-        file_put_contents($this->file, json_encode($this->data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+        $json = json_encode($this->data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        if ($json === false) {
+            return;
+        }
+
+        if ($this->saveRemote($json)) {
+            return;
+        }
+
+        file_put_contents($this->file, $json);
+    }
+
+    private function loadRemote(): ?array
+    {
+        $response = $this->redisCommand(['GET', self::STORE_KEY]);
+        $payload = is_array($response) ? ($response['result'] ?? null) : null;
+        if (!is_string($payload) || $payload === '') {
+            return null;
+        }
+
+        $data = json_decode($payload, true);
+        return is_array($data) ? $data : null;
+    }
+
+    private function saveRemote(string $json): bool
+    {
+        $response = $this->redisCommand(['SET', self::STORE_KEY, $json]);
+        return is_array($response) && (($response['result'] ?? null) === 'OK');
+    }
+
+    private function redisCommand(array $command): ?array
+    {
+        $url = rtrim((string)(getenv('KV_REST_API_URL') ?: getenv('UPSTASH_REDIS_REST_URL') ?: ''), '/');
+        $token = (string)(getenv('KV_REST_API_TOKEN') ?: getenv('UPSTASH_REDIS_REST_TOKEN') ?: '');
+        if ($url === '' || $token === '') {
+            return null;
+        }
+
+        $body = json_encode($command, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        if ($body === false) {
+            return null;
+        }
+
+        $context = stream_context_create([
+            'http' => [
+                'method' => 'POST',
+                'header' => implode("\r\n", [
+                    'Authorization: Bearer ' . $token,
+                    'Content-Type: application/json',
+                ]),
+                'content' => $body,
+                'timeout' => 8,
+                'ignore_errors' => true,
+            ],
+        ]);
+
+        $raw = @file_get_contents($url, false, $context);
+        if (!is_string($raw) || $raw === '') {
+            return null;
+        }
+
+        $decoded = json_decode($raw, true);
+        return is_array($decoded) ? $decoded : null;
     }
 }
