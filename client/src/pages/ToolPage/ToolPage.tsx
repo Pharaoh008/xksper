@@ -55,6 +55,9 @@ const ToolPage: React.FC = () => {
     content: '',
     fileType: 'markdown' as 'markdown' | 'zip',
     fileName: '',
+    scriptEnabled: false,
+    scriptRuntime: 'node' as 'node' | 'python' | 'php' | 'shell',
+    scriptContent: '',
   });
 
   const [parsedSkill, setParsedSkill] = useState<SkillParseResult | null>(null);
@@ -124,6 +127,9 @@ const ToolPage: React.FC = () => {
         content: result.content || '',
         fileType: result.fileType || (fileExtension === 'zip' ? 'zip' : 'markdown'),
         fileName: file.name,
+        scriptEnabled: Boolean(result.scriptContent),
+        scriptRuntime: result.scriptRuntime || 'node',
+        scriptContent: result.scriptContent || '',
       });
       if (result.name && !formData.name) {
         setFormData(prev => ({ ...prev, name: result.name }));
@@ -160,7 +166,7 @@ const ToolPage: React.FC = () => {
           headers: (tool.configData.headers as unknown as Array<{key: string; value: string}>) || [{ key: '', value: '' }],
         });
         setPluginConfig({ pluginKey: '', instanceId: '' });
-        setSkillConfig({ content: '', fileType: 'markdown', fileName: '' });
+        setSkillConfig({ content: '', fileType: 'markdown', fileName: '', scriptEnabled: false, scriptRuntime: 'node', scriptContent: '' });
         setParsedSkill(null);
       } else if (tool.type === 'cloud_plugin' && tool.configData) {
         setPluginConfig({
@@ -168,13 +174,16 @@ const ToolPage: React.FC = () => {
           instanceId: (tool.configData.instanceId as string) || '',
         });
         setMcpConfig({ url: '', headers: [{ key: '', value: '' }] });
-        setSkillConfig({ content: '', fileType: 'markdown', fileName: '' });
+        setSkillConfig({ content: '', fileType: 'markdown', fileName: '', scriptEnabled: false, scriptRuntime: 'node', scriptContent: '' });
         setParsedSkill(null);
       } else if (tool.type === 'skill' && tool.skill) {
         setSkillConfig({
           content: tool.skill.content || '',
           fileType: tool.skill.fileType || 'markdown',
           fileName: tool.skill.name || '',
+          scriptEnabled: Boolean(tool.configData?.scriptEnabled || tool.skill.scriptEnabled),
+          scriptRuntime: (tool.configData?.scriptRuntime as 'node' | 'python' | 'php' | 'shell') || tool.skill.scriptRuntime || 'node',
+          scriptContent: (tool.configData?.scriptContent as string) || tool.skill.scriptContent || '',
         });
         setParsedSkill({
           name: tool.skill.name || '',
@@ -193,7 +202,7 @@ const ToolPage: React.FC = () => {
       setFormData({ name: '', type: 'mcp', description: '', configData: {} });
       setMcpConfig({ url: '', headers: [{ key: '', value: '' }] });
       setPluginConfig({ pluginKey: '', instanceId: '' });
-      setSkillConfig({ content: '', fileType: 'markdown', fileName: '' });
+      setSkillConfig({ content: '', fileType: 'markdown', fileName: '', scriptEnabled: false, scriptRuntime: 'node', scriptContent: '' });
       setParsedSkill(null);
     }
     setIsDialogOpen(true);
@@ -205,7 +214,7 @@ const ToolPage: React.FC = () => {
     setFormData({ name: '', type: 'mcp', description: '', configData: {} });
     setMcpConfig({ url: '', headers: [{ key: '', value: '' }] });
     setPluginConfig({ pluginKey: '', instanceId: '' });
-    setSkillConfig({ content: '', fileType: 'markdown', fileName: '' });
+    setSkillConfig({ content: '', fileType: 'markdown', fileName: '', scriptEnabled: false, scriptRuntime: 'node', scriptContent: '' });
     setParsedSkill(null);
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
@@ -229,6 +238,10 @@ const ToolPage: React.FC = () => {
       } else if (formData.type === 'cloud_plugin') {
         configData.pluginKey = pluginConfig.pluginKey;
         configData.instanceId = pluginConfig.instanceId;
+      } else if (formData.type === 'skill') {
+        configData.scriptEnabled = skillConfig.scriptEnabled;
+        configData.scriptRuntime = skillConfig.scriptRuntime;
+        configData.scriptContent = skillConfig.scriptContent;
       }
 
       if (editingTool) {
@@ -243,6 +256,8 @@ const ToolPage: React.FC = () => {
           examples: parsedSkill?.examples,
           metadata: parsedSkill?.metadata,
           version: parsedSkill?.version,
+          scriptRuntime: skillConfig.scriptRuntime,
+          scriptContent: skillConfig.scriptContent,
         } : undefined;
         const updateRequest: UpdateToolRequest = {
           name: formData.name,
@@ -264,6 +279,8 @@ const ToolPage: React.FC = () => {
           examples: parsedSkill?.examples,
           metadata: parsedSkill?.metadata,
           version: parsedSkill?.version,
+          scriptRuntime: skillConfig.scriptRuntime,
+          scriptContent: skillConfig.scriptContent,
         } : undefined;
         const createRequest: CreateToolRequest = {
           name: formData.name,
@@ -577,7 +594,7 @@ const ToolPage: React.FC = () => {
                       size="sm"
                       onClick={(e) => {
                         e.stopPropagation();
-                        setSkillConfig({ content: '', fileType: 'markdown', fileName: '' });
+                        setSkillConfig({ content: '', fileType: 'markdown', fileName: '', scriptEnabled: false, scriptRuntime: 'node', scriptContent: '' });
                         setParsedSkill(null);
                         if (fileInputRef.current) {
                           fileInputRef.current.value = '';
@@ -680,6 +697,58 @@ const ToolPage: React.FC = () => {
                     请上传 Skill 文件以获取更多信息
                   </p>
                 )}
+
+                <div className="space-y-3 rounded-lg border border-border bg-card p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <Label className="text-sm font-medium">环境 Script 调用</Label>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        开启后，Agent LangGraph Harness 会执行脚本，并把 stdout/stderr 作为 observation 注入模型。
+                      </p>
+                    </div>
+                    <Button
+                      type="button"
+                      variant={skillConfig.scriptEnabled ? 'default' : 'outline'}
+                      size="sm"
+                      onClick={() => setSkillConfig(prev => ({ ...prev, scriptEnabled: !prev.scriptEnabled }))}
+                    >
+                      {skillConfig.scriptEnabled ? '已启用' : '启用'}
+                    </Button>
+                  </div>
+
+                  {skillConfig.scriptEnabled && (
+                    <div className="space-y-3">
+                      <div className="space-y-2">
+                        <Label>运行时</Label>
+                        <Select
+                          value={skillConfig.scriptRuntime}
+                          onValueChange={(value: 'node' | 'python' | 'php' | 'shell') =>
+                            setSkillConfig(prev => ({ ...prev, scriptRuntime: value }))
+                          }
+                        >
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="node">Node.js</SelectItem>
+                            <SelectItem value="python">Python</SelectItem>
+                            <SelectItem value="php">PHP</SelectItem>
+                            <SelectItem value="shell">Shell</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="space-y-2">
+                        <Label>Script 内容</Label>
+                        <textarea
+                          value={skillConfig.scriptContent}
+                          onChange={(e) => setSkillConfig(prev => ({ ...prev, scriptContent: e.target.value }))}
+                          placeholder="脚本通过 stdin 接收 JSON：{ query, skill, tool }，请将结果输出到 stdout。"
+                          className="min-h-[160px] w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs outline-none focus:border-primary focus:ring-1 focus:ring-primary"
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
             ) : (
               <div className="space-y-4 border-t pt-4">

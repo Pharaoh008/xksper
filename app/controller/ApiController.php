@@ -147,7 +147,7 @@ final class ApiController
             }
 
             if ($path === '/tools/parse-skill' && $method === 'POST') {
-                $this->json(['success' => true, 'data' => ['name' => $body['fileName'] ?? 'Skill', 'description' => 'Parsed by PHP API', 'inputSchema' => [], 'outputSchema' => [], 'examples' => [], 'content' => $body['content'] ?? '', 'fileType' => 'markdown']]);
+                $this->json(['success' => true, 'data' => $this->parseSkill($body)]);
             }
 
             if (preg_match('#^/tools/([^/]+)/test$#', $path, $m) && $method === 'POST') {
@@ -311,6 +311,7 @@ final class ApiController
                 'skillCount' => count($resources['skills']),
                 'toolCount' => count($resources['tools']),
                 'mcpObservationCount' => count($resources['mcpObservations']),
+                'skillObservationCount' => count($resources['skillObservations']),
                 'memoryCount' => count($resources['memory']),
             ],
         ]);
@@ -481,6 +482,7 @@ final class ApiController
             'skills' => $this->skillManifests($toolRows),
             'dataSources' => $this->selectedDataSources($dataSourceIds),
             'mcpObservations' => $executeMcp ? $this->callMcpTools($toolIds ? $toolRows : [], $query) : [],
+            'skillObservations' => $executeMcp ? $this->callSkillScripts($toolIds ? $toolRows : [], $query) : [],
             'memory' => $this->agentMemory($threadId),
             'mentions' => $mentions,
         ];
@@ -570,11 +572,14 @@ final class ApiController
             }
 
             $skill = is_array($tool['skill'] ?? null) ? $tool['skill'] : (is_array($tool['skillData'] ?? null) ? $tool['skillData'] : []);
+            $config = is_array($tool['configData'] ?? null) ? $tool['configData'] : [];
             $skills[] = [
                 'id' => (string)($tool['id'] ?? ''),
                 'name' => (string)($tool['name'] ?? $skill['name'] ?? 'Skill'),
                 'description' => (string)($tool['description'] ?? $skill['description'] ?? ''),
                 'content' => $this->slice((string)($skill['content'] ?? $skill['prompt'] ?? ''), 0, 5000),
+                'scriptEnabled' => (bool)($config['scriptEnabled'] ?? $skill['scriptEnabled'] ?? false),
+                'scriptRuntime' => (string)($config['scriptRuntime'] ?? $skill['scriptRuntime'] ?? ''),
             ];
         }
 
@@ -618,6 +623,9 @@ final class ApiController
     private function toolCallPolicy(string $type, array $config): string
     {
         if ($type === 'skill') {
+            if ((bool)($config['scriptEnabled'] ?? false)) {
+                return 'Executable Skill script. The harness may run it and inject stdout/stderr as an observation.';
+            }
             return 'Apply as an internal skill instruction before answering.';
         }
         if (trim((string)($config['url'] ?? $config['endpoint'] ?? '')) !== '') {
@@ -687,6 +695,110 @@ final class ApiController
         }
 
         return $observations;
+    }
+
+    private function callSkillScripts(array $tools, string $query): array
+    {
+        $observations = [];
+        foreach ($tools as $tool) {
+            if ((string)($tool['type'] ?? '') !== 'skill') {
+                continue;
+            }
+
+            $config = is_array($tool['configData'] ?? null) ? $tool['configData'] : [];
+            $skill = is_array($tool['skill'] ?? null) ? $tool['skill'] : (is_array($tool['skillData'] ?? null) ? $tool['skillData'] : []);
+            if (!(bool)($config['scriptEnabled'] ?? $skill['scriptEnabled'] ?? false)) {
+                continue;
+            }
+
+            $script = (string)($config['scriptContent'] ?? $skill['scriptContent'] ?? '');
+            $runtime = (string)($config['scriptRuntime'] ?? $skill['scriptRuntime'] ?? 'node');
+            if (trim($script) === '') {
+                $observations[] = [
+                    'skill' => (string)($tool['name'] ?? 'Skill'),
+                    'status' => 'skipped',
+                    'message' => 'Skill script is empty.',
+                ];
+                continue;
+            }
+
+            try {
+                $observations[] = $this->runSkillScript($tool, $skill, $runtime, $script, $query);
+            } catch (Throwable $error) {
+                $observations[] = [
+                    'skill' => (string)($tool['name'] ?? 'Skill'),
+                    'runtime' => $runtime,
+                    'status' => 'error',
+                    'message' => $this->slice($error->getMessage(), 0, 1200),
+                ];
+            }
+        }
+
+        return $observations;
+    }
+
+    private function runSkillScript(array $tool, array $skill, string $runtime, string $script, string $query): array
+    {
+        if (!function_exists('proc_open')) {
+            throw new RuntimeException('proc_open is disabled in this runtime. Use a remote MCP/HTTP tool for script execution.');
+        }
+
+        $runtime = in_array($runtime, ['node', 'python', 'php', 'shell'], true) ? $runtime : 'node';
+        $extension = ['node' => 'js', 'python' => 'py', 'php' => 'php', 'shell' => 'sh'][$runtime];
+        $file = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'skill_' . $this->id() . '.' . $extension;
+        file_put_contents($file, $script);
+
+        $command = match ($runtime) {
+            'python' => ['python', $file],
+            'php' => ['php', $file],
+            'shell' => ['sh', $file],
+            default => ['node', $file],
+        };
+
+        $payload = json_encode([
+            'query' => $query,
+            'tool' => [
+                'id' => (string)($tool['id'] ?? ''),
+                'name' => (string)($tool['name'] ?? ''),
+                'description' => (string)($tool['description'] ?? ''),
+            ],
+            'skill' => [
+                'name' => (string)($skill['name'] ?? $tool['name'] ?? ''),
+                'description' => (string)($skill['description'] ?? $tool['description'] ?? ''),
+                'content' => $this->slice((string)($skill['content'] ?? ''), 0, 8000),
+            ],
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: '{}';
+
+        $descriptor = [
+            0 => ['pipe', 'r'],
+            1 => ['pipe', 'w'],
+            2 => ['pipe', 'w'],
+        ];
+        $process = proc_open($command, $descriptor, $pipes, sys_get_temp_dir());
+        if (!is_resource($process)) {
+            @unlink($file);
+            throw new RuntimeException('Unable to start script process. Runtime may be unavailable.');
+        }
+
+        fwrite($pipes[0], $payload);
+        fclose($pipes[0]);
+        stream_set_timeout($pipes[1], 12);
+        stream_set_timeout($pipes[2], 12);
+        $stdout = stream_get_contents($pipes[1]) ?: '';
+        $stderr = stream_get_contents($pipes[2]) ?: '';
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $exitCode = proc_close($process);
+        @unlink($file);
+
+        return [
+            'skill' => (string)($tool['name'] ?? 'Skill'),
+            'runtime' => $runtime,
+            'status' => $exitCode === 0 ? 'ok' : 'error',
+            'exitCode' => $exitCode,
+            'stdout' => $this->slice($stdout, 0, 6000),
+            'stderr' => $this->slice($stderr, 0, 2000),
+        ];
     }
 
     private function mcpHeaders(array $config): array
@@ -777,6 +889,7 @@ final class ApiController
             'Skills:' . "\n" . $this->formatContext($resources['skills']),
             'Tool Manifest:' . "\n" . $this->formatContext($resources['tools']),
             'MCP Observations:' . "\n" . $this->formatContext($resources['mcpObservations']),
+            'Skill Script Observations:' . "\n" . $this->formatContext($resources['skillObservations']),
             'Data Sources:' . "\n" . $this->formatContext($resources['dataSources']),
         ]);
     }
@@ -788,6 +901,7 @@ final class ApiController
             'Knowledge:' . "\n" . $this->formatContext($resources['knowledge']),
             'Skills:' . "\n" . $this->formatContext($resources['skills']),
             'Tool Manifest:' . "\n" . $this->formatContext($resources['tools']),
+            'Skill Script Observations:' . "\n" . $this->formatContext($resources['skillObservations'] ?? []),
             'Data Sources:' . "\n" . $this->formatContext($resources['dataSources']),
         ]);
     }
@@ -902,6 +1016,157 @@ final class ApiController
         }
 
         $this->json(['message' => 'Method not allowed'], 405);
+    }
+
+    private function parseSkill(array $body): array
+    {
+        $fileName = (string)($body['fileName'] ?? 'Skill.md');
+        $raw = (string)($body['content'] ?? '');
+        $decoded = base64_decode($raw, true);
+        $content = $decoded !== false ? $decoded : $raw;
+        $extension = strtolower(pathinfo($fileName, PATHINFO_EXTENSION));
+        $fileType = $extension === 'zip' ? 'zip' : 'markdown';
+        $scriptContent = '';
+        $scriptRuntime = 'node';
+
+        if ($fileType === 'zip') {
+            $parsed = $this->extractSkillZip($content);
+            $content = $parsed['content'];
+            $scriptContent = $parsed['scriptContent'];
+            $scriptRuntime = $parsed['scriptRuntime'];
+        } else {
+            $detected = $this->extractEmbeddedScript($content);
+            $scriptContent = $detected['scriptContent'];
+            $scriptRuntime = $detected['scriptRuntime'];
+        }
+
+        $frontmatter = $this->parseFrontmatter($content);
+        $name = (string)($frontmatter['name'] ?? preg_replace('/\.(md|markdown|zip)$/i', '', $fileName) ?: 'Skill');
+        $description = (string)($frontmatter['description'] ?? $this->firstMarkdownParagraph($content));
+
+        return [
+            'name' => $name,
+            'description' => $description,
+            'inputSchema' => $this->normalizeSkillParams($frontmatter['inputSchema'] ?? $frontmatter['inputs'] ?? []),
+            'outputSchema' => $this->normalizeSkillParams($frontmatter['outputSchema'] ?? $frontmatter['outputs'] ?? []),
+            'examples' => is_array($frontmatter['examples'] ?? null) ? $frontmatter['examples'] : [],
+            'metadata' => is_array($frontmatter['metadata'] ?? null) ? $frontmatter['metadata'] : [],
+            'version' => (string)($frontmatter['version'] ?? '1.0.0'),
+            'content' => $content,
+            'fileType' => $fileType,
+            'scriptRuntime' => $scriptRuntime,
+            'scriptContent' => $scriptContent,
+        ];
+    }
+
+    private function extractSkillZip(string $bytes): array
+    {
+        $result = ['content' => '', 'scriptRuntime' => 'node', 'scriptContent' => ''];
+        if (!class_exists('ZipArchive')) {
+            $result['content'] = 'ZipArchive is not available in this PHP runtime. Store the zip externally or upload markdown.';
+            return $result;
+        }
+
+        $zipPath = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'skill_' . $this->id() . '.zip';
+        file_put_contents($zipPath, $bytes);
+        $zip = new \ZipArchive();
+        if ($zip->open($zipPath) !== true) {
+            @unlink($zipPath);
+            $result['content'] = 'Unable to open uploaded zip skill.';
+            return $result;
+        }
+
+        for ($i = 0; $i < $zip->numFiles; $i++) {
+            $name = (string)$zip->getNameIndex($i);
+            $lower = strtolower($name);
+            if ($result['content'] === '' && (str_ends_with($lower, 'skill.md') || str_ends_with($lower, 'skill.markdown') || str_ends_with($lower, '.md'))) {
+                $result['content'] = (string)$zip->getFromIndex($i);
+            }
+            if ($result['scriptContent'] === '' && preg_match('/\.(js|mjs|py|php|sh)$/i', $name, $m)) {
+                $result['scriptContent'] = (string)$zip->getFromIndex($i);
+                $result['scriptRuntime'] = match (strtolower($m[1])) {
+                    'py' => 'python',
+                    'php' => 'php',
+                    'sh' => 'shell',
+                    default => 'node',
+                };
+            }
+        }
+        $zip->close();
+        @unlink($zipPath);
+
+        if ($result['content'] === '') {
+            $result['content'] = 'No SKILL.md or markdown file was found in the uploaded zip.';
+        }
+
+        return $result;
+    }
+
+    private function extractEmbeddedScript(string $content): array
+    {
+        if (preg_match('/```(javascript|js|node|python|py|php|bash|shell|sh)\s+skill-script\s*\R([\s\S]*?)```/i', $content, $m)) {
+            $lang = strtolower($m[1]);
+            return [
+                'scriptRuntime' => match ($lang) {
+                    'python', 'py' => 'python',
+                    'php' => 'php',
+                    'bash', 'shell', 'sh' => 'shell',
+                    default => 'node',
+                },
+                'scriptContent' => trim($m[2]),
+            ];
+        }
+
+        return ['scriptRuntime' => 'node', 'scriptContent' => ''];
+    }
+
+    private function parseFrontmatter(string $content): array
+    {
+        if (!preg_match('/^---\s*\R([\s\S]*?)\R---/u', $content, $m)) {
+            return [];
+        }
+
+        $data = [];
+        foreach (preg_split('/\R/', trim($m[1])) ?: [] as $line) {
+            if (!str_contains($line, ':')) {
+                continue;
+            }
+            [$key, $value] = array_map('trim', explode(':', $line, 2));
+            $value = trim($value, " \"'");
+            if ($key !== '') {
+                $data[$key] = $value;
+            }
+        }
+
+        return $data;
+    }
+
+    private function firstMarkdownParagraph(string $content): string
+    {
+        $content = preg_replace('/^---\s*\R[\s\S]*?\R---/u', '', $content) ?? $content;
+        foreach (preg_split('/\R{2,}/', trim($content)) ?: [] as $block) {
+            $block = trim((string)preg_replace('/^#+\s*/m', '', $block));
+            if ($block !== '' && !str_starts_with($block, '```')) {
+                return $this->slice($block, 0, 240);
+            }
+        }
+
+        return '';
+    }
+
+    private function normalizeSkillParams(mixed $value): array
+    {
+        return is_array($value) ? array_values(array_filter(array_map(function ($row) {
+            if (!is_array($row)) {
+                return null;
+            }
+            return [
+                'name' => (string)($row['name'] ?? ''),
+                'type' => (string)($row['type'] ?? 'string'),
+                'description' => (string)($row['description'] ?? ''),
+                'required' => (bool)($row['required'] ?? false),
+            ];
+        }, $value))) : [];
     }
 
     private function resourceById(string $name, string $method, string $id, array $body, callable $shape): void
@@ -1076,7 +1341,33 @@ final class ApiController
 
     private function tool(array $row): array
     {
-        return $this->timestamps($row + ['name' => 'Default Tool', 'type' => 'mcp', 'description' => '', 'configData' => [], 'isActive' => true]);
+        $row = $this->timestamps($row + ['name' => 'Default Tool', 'type' => 'mcp', 'description' => '', 'configData' => [], 'isActive' => true]);
+        if (($row['type'] ?? '') === 'skill') {
+            $skill = is_array($row['skill'] ?? null) ? $row['skill'] : (is_array($row['skillData'] ?? null) ? $row['skillData'] : []);
+            $config = is_array($row['configData'] ?? null) ? $row['configData'] : [];
+            $row['skill'] = [
+                'id' => (string)($skill['id'] ?? $row['id'] . '-skill'),
+                'toolId' => (string)$row['id'],
+                'name' => (string)($skill['name'] ?? $row['name']),
+                'description' => (string)($skill['description'] ?? $row['description'] ?? ''),
+                'content' => (string)($skill['content'] ?? ''),
+                'fileType' => (string)($skill['fileType'] ?? 'markdown'),
+                'inputSchema' => is_array($skill['inputSchema'] ?? null) ? $skill['inputSchema'] : [],
+                'outputSchema' => is_array($skill['outputSchema'] ?? null) ? $skill['outputSchema'] : [],
+                'examples' => is_array($skill['examples'] ?? null) ? $skill['examples'] : [],
+                'metadata' => is_array($skill['metadata'] ?? null) ? $skill['metadata'] : [],
+                'version' => (string)($skill['version'] ?? '1.0.0'),
+                'scriptEnabled' => (bool)($config['scriptEnabled'] ?? $skill['scriptEnabled'] ?? false),
+                'scriptRuntime' => (string)($config['scriptRuntime'] ?? $skill['scriptRuntime'] ?? 'node'),
+                'scriptContent' => (string)($config['scriptContent'] ?? $skill['scriptContent'] ?? ''),
+                'isActive' => (bool)($row['isActive'] ?? true),
+                'createdAt' => (string)($skill['createdAt'] ?? $row['createdAt']),
+                'updatedAt' => (string)$row['updatedAt'],
+            ];
+            unset($row['skillData']);
+        }
+
+        return $row;
     }
 
     private function organization(array $row): array

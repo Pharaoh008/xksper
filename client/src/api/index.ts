@@ -384,6 +384,8 @@ export interface CreateToolRequest {
     examples?: Array<{ input: Record<string, unknown>; output: string }>;
     metadata?: { author?: string; tags?: string[]; category?: string };
     version?: string;
+    scriptRuntime?: 'node' | 'python' | 'php' | 'shell';
+    scriptContent?: string;
   };
 }
 
@@ -403,6 +405,8 @@ export interface UpdateToolRequest {
     examples?: Array<{ input: Record<string, unknown>; output: string }>;
     metadata?: { author?: string; tags?: string[]; category?: string };
     version?: string;
+    scriptRuntime?: 'node' | 'python' | 'php' | 'shell';
+    scriptContent?: string;
   };
 }
 

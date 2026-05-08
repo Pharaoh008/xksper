@@ -401,6 +401,9 @@ export interface Skill {
   examples?: SkillExample[];
   metadata?: SkillMetadata;
   version: string;
+  scriptRuntime?: 'node' | 'python' | 'php' | 'shell';
+  scriptContent?: string;
+  scriptEnabled?: boolean;
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
@@ -440,6 +443,8 @@ export interface SkillParseResult {
   content?: string;
   /** 文件类型 */
   fileType?: 'markdown' | 'zip';
+  scriptRuntime?: 'node' | 'python' | 'php' | 'shell';
+  scriptContent?: string;
 }
 
 /** 工具信息 */
@@ -454,6 +459,9 @@ export interface Tool {
     pluginKey?: string;
     instanceId?: string;
     skillId?: string;
+    scriptEnabled?: boolean;
+    scriptRuntime?: 'node' | 'python' | 'php' | 'shell';
+    scriptContent?: string;
   };
   isActive: boolean;
   createdAt: string;
