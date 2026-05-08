@@ -3,7 +3,9 @@ const fs = require("fs");
 const path = require("path");
 const { fetchProduct } = require("./lib/amazon");
 
-const PORT = Number(process.env.PORT || 3000);
+const portArgIndex = process.argv.indexOf("--port");
+const cliPort = portArgIndex >= 0 ? process.argv[portArgIndex + 1] : "";
+const PORT = Number(process.env.PORT || cliPort || 3000);
 const PUBLIC_DIR = path.join(__dirname, "public");
 
 const MIME_TYPES = {
@@ -37,7 +39,7 @@ function sendFile(res, filePath) {
   });
 }
 
-function handleApi(req, res) {
+function handleProduct(req, res) {
   const requestUrl = new URL(req.url, `http://${req.headers.host}`);
   const country = requestUrl.searchParams.get("country") || "";
   const asin = requestUrl.searchParams.get("asin") || "";
@@ -47,15 +49,37 @@ function handleApi(req, res) {
     .catch((error) => sendJson(res, 400, { ok: false, error: error.message }));
 }
 
+function handleAgent(req, res) {
+  if (req.method !== "POST") {
+    sendJson(res, 405, {
+      ok: false,
+      error: "Method not allowed."
+    });
+    return;
+  }
+
+  sendJson(res, 501, {
+    ok: false,
+    error: "Local Node preview only serves the frontend. /api/agent.php runs on Vercel with the PHP serverless runtime."
+  });
+}
+
 const server = http.createServer((req, res) => {
   const requestUrl = new URL(req.url, `http://${req.headers.host}`);
+
   if (requestUrl.pathname === "/api/product") {
-    handleApi(req, res);
+    handleProduct(req, res);
+    return;
+  }
+
+  if (requestUrl.pathname === "/api/agent.php") {
+    handleAgent(req, res);
     return;
   }
 
   const safePath = requestUrl.pathname === "/" ? "/index.html" : requestUrl.pathname;
   const filePath = path.normalize(path.join(PUBLIC_DIR, safePath));
+
   if (!filePath.startsWith(PUBLIC_DIR)) {
     res.writeHead(403);
     res.end("Forbidden");
@@ -66,5 +90,5 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`Amazon product scraper running at http://localhost:${PORT}`);
+  console.log(`AgentOps Studio running at http://localhost:${PORT}`);
 });

@@ -3,70 +3,191 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Amazon 产品信息批量抓取</title>
+    <title>AgentOps Studio</title>
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
     <main class="app-shell">
-      <section class="workspace">
-        <div class="query-panel">
+      <aside class="control-panel">
+        <header class="brand">
+          <div class="brand-mark">A</div>
           <div>
-            <p class="eyebrow">Amazon Product Fetcher</p>
-            <h1>批量输入 ASIN，生成产品对比表</h1>
+            <p class="eyebrow">PHP + LangGraph Harness</p>
+            <h1>AgentOps Studio</h1>
+          </div>
+        </header>
+
+        <nav class="tabs" aria-label="工作区">
+          <button class="tab active" type="button" data-view="chat">运行</button>
+          <button class="tab" type="button" data-view="agent">智能体</button>
+          <button class="tab" type="button" data-view="context">上下文</button>
+          <button class="tab" type="button" data-view="settings">配置</button>
+        </nav>
+
+        <section class="status-strip">
+          <div>
+            <span>模型</span>
+            <strong id="status-model">GPT</strong>
+          </div>
+          <div>
+            <span>知识库</span>
+            <strong id="status-kb">0</strong>
+          </div>
+          <div>
+            <span>Skill</span>
+            <strong id="status-skills">0</strong>
+          </div>
+        </section>
+      </aside>
+
+      <section class="workspace">
+        <section class="view active" id="view-chat">
+          <div class="topbar">
+            <div>
+              <p class="eyebrow">Harness Console</p>
+              <h2>调试你的智能体</h2>
+            </div>
+            <button class="icon-button" type="button" id="clear-chat" title="清空对话">⌫</button>
           </div>
 
-          <form id="scrape-form" class="form-grid">
+          <div class="chat-layout">
+            <section class="transcript" id="transcript" aria-live="polite"></section>
+            <aside class="harness">
+              <h3>公开推理过程</h3>
+              <div id="reasoning-list" class="reasoning-list">
+                <article>
+                  <strong>等待任务</strong>
+                  <p>运行后会展示可审计的推理摘要、上下文选择、MCP/Skill 注入和节点耗时。</p>
+                </article>
+              </div>
+              <h3>图节点</h3>
+              <ol id="trace-list">
+                <li>等待输入</li>
+              </ol>
+            </aside>
+          </div>
+
+          <form class="composer" id="chat-form">
+            <textarea id="message" placeholder="输入任务，例如：帮我设计一个销售线索评分 Agent" required></textarea>
+            <button type="submit" id="run-button">运行</button>
+          </form>
+        </section>
+
+        <section class="view" id="view-agent">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Agent Builder</p>
+              <h2>创建智能体</h2>
+            </div>
+            <button type="button" id="save-agent">保存</button>
+          </div>
+
+          <div class="form-grid two">
             <label>
-              <span>国家</span>
-              <select id="country" name="country" required>
-                <option value="us">美国 amazon.com</option>
-                <option value="uk">英国 amazon.co.uk</option>
-                <option value="de">德国 amazon.de</option>
-                <option value="fr">法国 amazon.fr</option>
-                <option value="it">意大利 amazon.it</option>
-                <option value="es">西班牙 amazon.es</option>
-                <option value="ca">加拿大 amazon.ca</option>
-                <option value="jp">日本 amazon.co.jp</option>
-                <option value="au">澳大利亚 amazon.com.au</option>
-                <option value="mx">墨西哥 amazon.com.mx</option>
-                <option value="nl">荷兰 amazon.nl</option>
-                <option value="se">瑞典 amazon.se</option>
-                <option value="pl">波兰 amazon.pl</option>
-                <option value="tr">土耳其 amazon.com.tr</option>
-                <option value="ae">阿联酋 amazon.ae</option>
-                <option value="sa">沙特 amazon.sa</option>
-                <option value="in">印度 amazon.in</option>
-                <option value="sg">新加坡 amazon.sg</option>
-                <option value="br">巴西 amazon.com.br</option>
+              <span>智能体名称</span>
+              <input id="agent-name" value="Vercel Agent">
+            </label>
+            <label>
+              <span>模型供应商</span>
+              <select id="provider">
+                <option value="openai">GPT / OpenAI 兼容</option>
+                <option value="anthropic">Claude / Anthropic</option>
+                <option value="gemini">Gemini 原生</option>
               </select>
             </label>
-
             <label>
-              <span>ASIN 列表</span>
-              <textarea id="asins" name="asins" placeholder="每行一个 ASIN，也可以用逗号或空格分隔&#10;例如：&#10;B08N5WRWNW&#10;B07PXGQC1Q" required></textarea>
+              <span>模型 ID</span>
+              <input id="model" value="gpt-4o" placeholder="gpt-4o / gpt-5-mini / claude-sonnet-4-6">
             </label>
+            <label>
+              <span>温度</span>
+              <input id="temperature" type="number" min="0" max="2" step="0.1" value="0.4">
+            </label>
+          </div>
 
-            <div class="actions">
-              <button id="submit-button" type="submit">
-                <span class="button-icon" aria-hidden="true">↗</span>
-                批量抓取
-              </button>
-              <button id="export-button" class="secondary-button" type="button" disabled>
-                <span class="button-icon" aria-hidden="true">↓</span>
-                导出 Excel
-              </button>
+          <label class="full-field">
+            <span>系统提示词</span>
+            <textarea id="system-prompt">你是一个可靠、主动、会说明推理边界的业务智能体。你会优先使用已提供的知识库、Skill 和 MCP 上下文，回答时给出可执行步骤。</textarea>
+          </label>
+        </section>
+
+        <section class="view" id="view-context">
+          <div class="context-grid">
+            <article class="context-column">
+              <div class="section-head compact">
+                <h2>知识库</h2>
+              </div>
+              <form class="quick-add" data-create="knowledge">
+                <input name="title" placeholder="标题，例如：产品定价规则" required>
+                <textarea name="content" placeholder="粘贴知识内容、规则、FAQ 或 SOP" required></textarea>
+                <button type="submit">创建知识库</button>
+              </form>
+              <div id="knowledge-list" class="list"></div>
+            </article>
+
+            <article class="context-column">
+              <div class="section-head compact">
+                <h2>MCP</h2>
+              </div>
+              <form class="quick-add" data-create="mcp">
+                <input name="name" placeholder="名称，例如：CRM MCP" required>
+                <input name="endpoint" placeholder="HTTP MCP 网关地址，可留空">
+                <textarea name="description" placeholder="说明这个 MCP 能提供什么能力"></textarea>
+                <button type="submit">创建 MCP</button>
+              </form>
+              <div id="mcp-list" class="list"></div>
+            </article>
+
+            <article class="context-column">
+              <div class="section-head compact">
+                <h2>Skill</h2>
+              </div>
+              <form class="quick-add" data-create="skills">
+                <input name="name" placeholder="名称，例如：结构化方案" required>
+                <textarea name="prompt" placeholder="写入这个 Skill 要注入给智能体的行为规则" required></textarea>
+                <button type="submit">创建 Skill</button>
+              </form>
+              <div id="skill-list" class="list"></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="view" id="view-settings">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">wcnb.ai</p>
+              <h2>模型中转配置</h2>
             </div>
-          </form>
-        </div>
+            <button type="button" id="save-settings">保存配置</button>
+          </div>
 
-        <section id="result" class="result-panel empty">
-          <div class="empty-state">
-            <div class="empty-mark">ASIN</div>
-            <p>等待输入产品信息</p>
+          <div class="form-grid">
+            <label>
+              <span>API Key</span>
+              <input id="api-key" type="password" placeholder="可选：留空则使用 Vercel 环境变量 WCNB_API_KEY">
+            </label>
+            <label>
+              <span>Base URL</span>
+              <input id="base-url" value="https://wcnb.ai">
+            </label>
+          </div>
+
+          <div class="note">
+            生产环境默认使用 Vercel 环境变量 WCNB_API_KEY。这里的 API Key 只作为临时覆盖值，保存于当前浏览器 localStorage。
           </div>
         </section>
       </section>
     </main>
+
+    <template id="item-template">
+      <article class="item">
+        <div>
+          <strong></strong>
+          <p></p>
+        </div>
+        <button type="button" title="删除">×</button>
+      </article>
+    </template>
 
     <script src="/app.js"></script>
   </body>

@@ -1,8 +1,32 @@
 {
   "version": 2,
-  "functions": {
-    "api/product.js": {
-      "maxDuration": 20
+  "builds": [
+    {
+      "src": "package.json",
+      "use": "@vercel/static-build",
+      "config": {
+        "distDir": "dist/client"
+      }
+    },
+    {
+      "src": "api/index.php",
+      "use": "vercel-php@0.7.4",
+      "config": {
+        "maxDuration": 45
+      }
     }
-  }
+  ],
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "/api/index.php"
+    },
+    {
+      "handle": "filesystem"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/index.html"
+    }
+  ]
 }

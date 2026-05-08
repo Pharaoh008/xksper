@@ -1,27 +1,69 @@
-const form = document.querySelector("#scrape-form");
-const result = document.querySelector("#result");
-const submitButton = document.querySelector("#submit-button");
-const exportButton = document.querySelector("#export-button");
+const storeKey = "agentops-studio:v1";
 
-let latestRows = [];
+const defaults = {
+  settings: {
+    apiKey: "",
+    baseUrl: "https://wcnb.ai"
+  },
+  agent: {
+    name: "Vercel Agent",
+    provider: "openai",
+    model: "gpt-4o",
+    temperature: 0.4,
+    systemPrompt: "你是一个可靠、主动、会说明推理边界的业务智能体。你会优先使用已提供的知识库、Skill 和 MCP 上下文，回答时给出可执行步骤。"
+  },
+  knowledge: [
+    {
+      title: "项目边界",
+      content: "这个网站使用 PHP Serverless API 作为模型调用层，前端用于配置 Agent、知识库、MCP 与 Skill。"
+    }
+  ],
+  mcp: [
+    {
+      name: "HTTP MCP 示例",
+      endpoint: "",
+      description: "可填写一个 HTTP MCP 网关地址，Harness 会把当前任务发给它并纳入上下文。"
+    }
+  ],
+  skills: [
+    {
+      name: "结构化交付",
+      prompt: "回答必须先给结论，再给步骤，最后列出风险和下一步。"
+    }
+  ],
+  messages: []
+};
 
-function setLoading(done, total) {
-  result.className = "result-panel empty";
-  result.innerHTML = `
-    <div class="loading">
-      <div class="spinner" aria-hidden="true"></div>
-      <p>正在抓取 Amazon 页面... ${done}/${total}</p>
-    </div>
-  `;
+let state = loadState();
+
+const views = document.querySelectorAll(".view");
+const tabs = document.querySelectorAll(".tab");
+const transcript = document.querySelector("#transcript");
+const traceList = document.querySelector("#trace-list");
+const reasoningList = document.querySelector("#reasoning-list");
+const form = document.querySelector("#chat-form");
+const messageInput = document.querySelector("#message");
+const runButton = document.querySelector("#run-button");
+const threadId = crypto.randomUUID ? crypto.randomUUID() : `thread-${Date.now()}`;
+
+function loadState() {
+  try {
+    return structuredClone({
+      ...defaults,
+      ...JSON.parse(localStorage.getItem(storeKey) || "{}")
+    });
+  } catch {
+    return structuredClone(defaults);
+  }
 }
 
-function setError(message) {
-  result.className = "result-panel";
-  result.innerHTML = `<div class="message">${escapeHtml(message)}</div>`;
+function saveState() {
+  localStorage.setItem(storeKey, JSON.stringify(state));
+  updateStatus();
 }
 
 function escapeHtml(value) {
-  return String(value)
+  return String(value || "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -29,200 +71,232 @@ function escapeHtml(value) {
     .replace(/'/g, "&#039;");
 }
 
-function textOrEmpty(value, fallback = "未抓取到") {
-  return value && String(value).trim() ? String(value).trim() : fallback;
+function bindForm() {
+  document.querySelector("#api-key").value = state.settings.apiKey;
+  document.querySelector("#base-url").value = state.settings.baseUrl;
+  document.querySelector("#agent-name").value = state.agent.name;
+  document.querySelector("#provider").value = state.agent.provider;
+  document.querySelector("#model").value = state.agent.model;
+  document.querySelector("#temperature").value = state.agent.temperature;
+  document.querySelector("#system-prompt").value = state.agent.systemPrompt;
 }
 
-function parseAsins(value) {
-  return [...new Set(
-    String(value || "")
-      .toUpperCase()
-      .split(/[\s,;，；]+/)
-      .map((item) => item.trim())
-      .filter(Boolean)
-  )];
+function readForm() {
+  state.settings.apiKey = document.querySelector("#api-key").value.trim();
+  state.settings.baseUrl = document.querySelector("#base-url").value.trim() || "https://wcnb.ai";
+  state.agent.name = document.querySelector("#agent-name").value.trim() || "Untitled Agent";
+  state.agent.provider = document.querySelector("#provider").value;
+  state.agent.model = document.querySelector("#model").value.trim();
+  state.agent.temperature = Number(document.querySelector("#temperature").value || 0.4);
+  state.agent.systemPrompt = document.querySelector("#system-prompt").value.trim();
+  saveState();
 }
 
-async function fetchProduct(country, asin) {
-  const response = await fetch(`/api/product?country=${encodeURIComponent(country)}&asin=${encodeURIComponent(asin)}`);
-  const payload = await response.json();
+function updateStatus() {
+  document.querySelector("#status-model").textContent = state.agent.provider.toUpperCase();
+  document.querySelector("#status-kb").textContent = state.knowledge.length;
+  document.querySelector("#status-skills").textContent = state.skills.length;
+}
 
-  if (!payload.ok) {
-    return {
-      asin,
-      ok: false,
-      title: "",
-      bullets: [],
-      reviewCount: "",
-      rating: "",
-      image: "",
-      url: "",
-      marketplace: "",
-      error: payload.error || "抓取失败"
-    };
+function renderMessages() {
+  if (!state.messages.length) {
+    transcript.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-mark">RUN</div>
+        <p>输入任务即可运行智能体。生产环境默认使用 Vercel 环境变量中的 wcnb.ai API Key。</p>
+      </div>
+    `;
+    return;
   }
 
-  return {
-    ok: true,
-    error: "",
-    ...payload.product
-  };
+  transcript.innerHTML = state.messages.map((message) => `
+    <article class="bubble ${message.role}">
+      <span>${message.role === "user" ? "你" : state.agent.name}</span>
+      <p>${escapeHtml(message.content)}</p>
+    </article>
+  `).join("");
+  transcript.scrollTop = transcript.scrollHeight;
 }
 
-function renderTable(rows) {
-  const bodyRows = rows.map((row, index) => {
-    const bullets = Array.from({ length: 5 }, (_, bulletIndex) => {
-      return `<td>${escapeHtml(row.bullets?.[bulletIndex] || "")}</td>`;
-    }).join("");
+function renderTrace(steps = []) {
+  traceList.innerHTML = (steps.length ? steps : ["等待输入"]).map((step) => {
+    if (typeof step === "string") return `<li>${escapeHtml(step)}</li>`;
 
-    const imageCell = row.image
-      ? `<a href="${escapeHtml(row.image)}" target="_blank" rel="noreferrer"><img class="thumb" src="${escapeHtml(row.image)}" alt="${escapeHtml(row.asin)} 首图"></a>`
-      : "未抓取到";
-
-    const titleCell = row.url
-      ? `<a href="${escapeHtml(row.url)}" target="_blank" rel="noreferrer">${escapeHtml(textOrEmpty(row.title))}</a>`
-      : escapeHtml(textOrEmpty(row.title));
+    const duration = Number.isFinite(step.durationMs) ? ` · ${step.durationMs}ms` : "";
+    const detail = step.detail ? `<small>${escapeHtml(step.detail)}</small>` : "";
+    const output = step.output
+      ? `<small>checkpoint: K${step.output.knowledge || 0} / S${step.output.skills || 0} / MCP${step.output.mcp || 0}</small>`
+      : "";
 
     return `
-      <tr class="${row.ok ? "" : "failed-row"}">
-        <td>${index + 1}</td>
-        <td>${escapeHtml(row.asin)}</td>
-        <td>${titleCell}</td>
-        <td>${escapeHtml(textOrEmpty(row.rating, ""))}</td>
-        <td>${escapeHtml(textOrEmpty(row.reviewCount, ""))}</td>
-        ${bullets}
-        <td>${imageCell}</td>
-        <td>${escapeHtml(row.error || "成功")}</td>
-      </tr>
+      <li>
+        <strong>${escapeHtml(step.node)} ${escapeHtml(step.status || "")}${duration}</strong>
+        ${detail}
+        ${output}
+      </li>
     `;
   }).join("");
-
-  result.className = "result-panel";
-  result.innerHTML = `
-    <div class="table-header">
-      <div>
-        <h2>产品对比表</h2>
-        <p>共 ${rows.length} 个 ASIN，成功 ${rows.filter((row) => row.ok).length} 个</p>
-      </div>
-    </div>
-    <div class="table-scroll">
-      <table>
-        <thead>
-          <tr>
-            <th>#</th>
-            <th>ASIN</th>
-            <th>标题</th>
-            <th>Rating</th>
-            <th>评论数</th>
-            <th>五行 1</th>
-            <th>五行 2</th>
-            <th>五行 3</th>
-            <th>五行 4</th>
-            <th>五行 5</th>
-            <th>首图</th>
-            <th>状态</th>
-          </tr>
-        </thead>
-        <tbody>${bodyRows}</tbody>
-      </table>
-    </div>
-  `;
 }
 
-function buildExcelHtml(rows) {
-  const header = ["ASIN", "标题", "Rating", "评论数", "五行 1", "五行 2", "五行 3", "五行 4", "五行 5", "首图", "Amazon URL", "状态"];
-  const tableRows = rows.map((row) => {
-    const cells = [
-      row.asin,
-      row.title,
-      row.rating,
-      row.reviewCount,
-      row.bullets?.[0] || "",
-      row.bullets?.[1] || "",
-      row.bullets?.[2] || "",
-      row.bullets?.[3] || "",
-      row.bullets?.[4] || "",
-      row.image,
-      row.url,
-      row.error || "成功"
-    ];
+function renderReasoning(items = []) {
+  reasoningList.innerHTML = (items.length ? items : [
+    { title: "等待任务", summary: "运行后会展示可审计的推理摘要、上下文选择、MCP/Skill 注入和节点耗时。" }
+  ]).map((item) => `
+    <article>
+      <strong>${escapeHtml(item.title)}</strong>
+      <p>${escapeHtml(item.summary)}</p>
+    </article>
+  `).join("");
+}
 
-    return `<tr>${cells.map((cell) => `<td>${escapeHtml(cell || "")}</td>`).join("")}</tr>`;
+function renderList(kind) {
+  const list = document.querySelector(`#${kind === "skills" ? "skill" : kind}-list`);
+  const rows = state[kind];
+
+  list.innerHTML = rows.map((item, index) => {
+    const title = item.title || item.name || `条目 ${index + 1}`;
+    const body = item.content || item.description || item.prompt || item.endpoint || "";
+    return `
+      <article class="item">
+        <div>
+          <strong>${escapeHtml(title)}</strong>
+          <p>${escapeHtml(body)}</p>
+        </div>
+        <button type="button" data-remove="${kind}" data-index="${index}" title="删除">×</button>
+      </article>
+    `;
   }).join("");
-
-  return `
-    <html>
-      <head>
-        <meta charset="utf-8">
-        <style>
-          table { border-collapse: collapse; }
-          th, td { border: 1px solid #999; padding: 6px; vertical-align: top; }
-          th { background: #e9f3ef; }
-        </style>
-      </head>
-      <body>
-        <table>
-          <thead><tr>${header.map((cell) => `<th>${escapeHtml(cell)}</th>`).join("")}</tr></thead>
-          <tbody>${tableRows}</tbody>
-        </table>
-      </body>
-    </html>
-  `;
 }
 
-function exportExcel() {
-  if (!latestRows.length) return;
-
-  const html = buildExcelHtml(latestRows);
-  const blob = new Blob(["\ufeff", html], { type: "application/vnd.ms-excel;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-
-  link.href = url;
-  link.download = `amazon-products-${new Date().toISOString().slice(0, 10)}.xls`;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
+function renderAll() {
+  bindForm();
+  updateStatus();
+  renderMessages();
+  renderTrace();
+  renderReasoning();
+  renderList("knowledge");
+  renderList("mcp");
+  renderList("skills");
 }
 
-form.addEventListener("submit", async (event) => {
-  event.preventDefault();
+tabs.forEach((tab) => {
+  tab.addEventListener("click", () => {
+    const target = tab.dataset.view;
+    tabs.forEach((item) => item.classList.toggle("active", item === tab));
+    views.forEach((view) => view.classList.toggle("active", view.id === `view-${target}`));
+  });
+});
 
-  const data = new FormData(form);
-  const country = String(data.get("country") || "").trim();
-  const asins = parseAsins(data.get("asins"));
-  const invalid = asins.filter((asin) => !/^[A-Z0-9]{10}$/.test(asin));
+document.querySelector("#save-agent").addEventListener("click", () => {
+  readForm();
+  renderAll();
+});
 
-  if (!asins.length) {
-    setError("请至少输入一个 ASIN。");
-    return;
-  }
+document.querySelector("#save-settings").addEventListener("click", () => {
+  readForm();
+  renderAll();
+});
 
-  if (invalid.length) {
-    setError(`以下 ASIN 格式不正确：${invalid.join(", ")}。ASIN 需要是 10 位字母或数字。`);
-    return;
-  }
+document.querySelector("#clear-chat").addEventListener("click", () => {
+  state.messages = [];
+  saveState();
+  renderMessages();
+  renderTrace();
+  renderReasoning();
+});
 
-  submitButton.disabled = true;
-  exportButton.disabled = true;
-  latestRows = [];
-  setLoading(0, asins.length);
+document.addEventListener("click", (event) => {
+  const remove = event.target.closest("[data-remove]");
 
-  try {
-    for (const asin of asins) {
-      const row = await fetchProduct(country, asin);
-      latestRows.push(row);
-      setLoading(latestRows.length, asins.length);
-    }
-
-    renderTable(latestRows);
-    exportButton.disabled = false;
-  } catch (error) {
-    setError(error.message);
-  } finally {
-    submitButton.disabled = false;
+  if (remove) {
+    state[remove.dataset.remove].splice(Number(remove.dataset.index), 1);
+    saveState();
+    renderAll();
   }
 });
 
-exportButton.addEventListener("click", exportExcel);
+document.querySelectorAll("[data-create]").forEach((createForm) => {
+  createForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+
+    const kind = createForm.dataset.create;
+    const data = new FormData(createForm);
+
+    if (kind === "knowledge") {
+      state.knowledge.push({
+        title: String(data.get("title") || "").trim(),
+        content: String(data.get("content") || "").trim()
+      });
+    }
+
+    if (kind === "mcp") {
+      const endpoint = String(data.get("endpoint") || "").trim();
+      state.mcp.push({
+        name: String(data.get("name") || "").trim(),
+        endpoint,
+        description: String(data.get("description") || endpoint || "待配置").trim()
+      });
+    }
+
+    if (kind === "skills") {
+      state.skills.push({
+        name: String(data.get("name") || "").trim(),
+        prompt: String(data.get("prompt") || "").trim()
+      });
+    }
+
+    createForm.reset();
+    saveState();
+    renderAll();
+  });
+});
+
+form.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  readForm();
+
+  const content = messageInput.value.trim();
+  if (!content) return;
+
+  state.messages.push({ role: "user", content });
+  messageInput.value = "";
+  renderMessages();
+  renderTrace([{ node: "client", status: "发送任务" }]);
+  renderReasoning([{ title: "请求已发送", summary: "正在进入 Harness 状态图，准备检索知识库、注入 Skill 并调用模型。" }]);
+  runButton.disabled = true;
+
+  try {
+    const response = await fetch("/api/agent.php", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        settings: state.settings,
+        threadId,
+        agent: state.agent,
+        knowledge: state.knowledge,
+        mcp: state.mcp,
+        skills: state.skills,
+        messages: state.messages
+      })
+    });
+    const payload = await response.json();
+
+    if (!payload.ok) throw new Error(payload.error || "智能体运行失败");
+
+    state.messages.push({ role: "assistant", content: payload.output });
+    saveState();
+    renderMessages();
+    renderTrace(payload.trace || []);
+    renderReasoning(payload.reasoning || []);
+  } catch (error) {
+    state.messages.push({ role: "assistant", content: `运行失败：${error.message}` });
+    saveState();
+    renderMessages();
+    renderTrace([{ node: "error", status: error.message }]);
+    renderReasoning([{ title: "运行失败", summary: error.message }]);
+  } finally {
+    runButton.disabled = false;
+  }
+});
+
+renderAll();
