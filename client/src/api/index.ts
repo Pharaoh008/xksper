@@ -78,6 +78,21 @@ export async function sendChat(request: ChatRequest, signal?: AbortSignal): Prom
   }
 }
 
+export async function sendAgentChat(request: ChatRequest, signal?: AbortSignal): Promise<ChatResp> {
+  try {
+    const response = await axiosForBackend<ChatResp>({
+      url: '/api/chat/agent',
+      method: 'POST',
+      data: request,
+      signal,
+    });
+    return response.data;
+  } catch (error) {
+    logger.error('Agent chat request failed', error);
+    throw error;
+  }
+}
+
 // 获取会话列表
 export async function getConversationList(params: {
   page?: number;

@@ -1,13 +1,13 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useLocation } from 'react-router-dom';
 import { useTypewriter } from '@/hooks/useTypewriter';
-import { Send, Loader2, Bot, User, BookOpen, Wrench, FileText, ChevronDown, ChevronRight, Database } from 'lucide-react';
+import { Send, Loader2, Bot, User, BookOpen, Wrench, FileText, ChevronDown, ChevronRight, Database, ListTodo } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Streamdown } from '@/components/ui/streamdown';
 import { ChatInput, type AttachedFile } from '@/components/ChatInput/ChatInput';
-import { sendChat, getConfigStatus, generateFile, getMessages } from '@/api/index';
+import { sendChat, sendAgentChat, getConfigStatus, generateFile, getMessages } from '@/api/index';
 import { useMentionResources } from '@/hooks/useMentionResources';
 import { toast } from 'sonner';
 import { logger } from '@lark-apaas/client-toolkit/logger';
@@ -20,6 +20,7 @@ const ChatPage: React.FC = () => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [agentMode, setAgentMode] = useState(false);
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -260,7 +261,7 @@ const ChatPage: React.FC = () => {
       // 提取当前消息中的 mentions
       const mentions = currentMentions;
 
-      const response = await sendChat({
+      const response = await (agentMode ? sendAgentChat : sendChat)({
         model: selectedModel,
         messages: [...historyMessages, { role: 'user', content: currentContentWithParsed, attachments: otherFiles.length > 0 ? attachments : undefined }],
         mentions: mentions.length > 0 ? mentions : undefined,
@@ -667,7 +668,7 @@ const ChatPage: React.FC = () => {
               <div className="max-w-[85%] rounded-lg px-4 py-3 bg-card border border-border">
                 <div className="flex items-center gap-2 text-muted-foreground">
                   <Loader2 className="h-4 w-4 animate-spin" />
-                  <span className="text-sm">AI 正在思考...</span>
+                  <span className="text-sm">{agentMode ? 'LangGraph Agent 正在 ReAct 推理...' : 'AI 正在思考...'}</span>
                 </div>
               </div>
             </div>
@@ -704,6 +705,18 @@ const ChatPage: React.FC = () => {
             setCurrentMentions(prev => prev.filter((_, i) => i !== index));
           }}
           onAddMention={handleAddMention}
+          extraActions={
+            <Button
+              type="button"
+              variant={agentMode ? 'default' : 'outline'}
+              size="icon"
+              onClick={() => setAgentMode((enabled) => !enabled)}
+              title={agentMode ? '已开启 LangGraph ReAct Agent' : '开启 LangGraph ReAct Agent'}
+              className="h-8 w-8"
+            >
+              <ListTodo className="h-4 w-4" />
+            </Button>
+          }
         >
           {/* @ 提及选择器 */}
           {showMentionPopover && (

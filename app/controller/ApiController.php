@@ -56,6 +56,10 @@ final class ApiController
                 $this->chat($body);
             }
 
+            if ($path === '/chat/agent' && $method === 'POST') {
+                $this->agentChat($body);
+            }
+
             if ($path === '/conversations') {
                 $this->collection('conversations', $method, $body, fn ($row) => $this->conversation($row), true);
             }
@@ -266,6 +270,37 @@ final class ApiController
         ]);
     }
 
+    private function agentChat(array $body): void
+    {
+        $messages = is_array($body['messages'] ?? null) ? $body['messages'] : [];
+        $mentions = is_array($body['mentions'] ?? null) ? $body['mentions'] : [];
+        $query = $this->lastUserMessage($messages);
+        $threadId = (string)($body['conversationId'] ?? 'default-thread');
+        $resources = $this->agentResources($mentions, $query, $threadId);
+
+        $system = $this->agentSystemPrompt($resources, $threadId);
+        $result = $this->callChatModel(array_merge([
+            ['role' => 'system', 'content' => $system],
+        ], $messages), (string)($body['model'] ?? ''));
+
+        $this->rememberAgentTurn($threadId, $query, $result['content']);
+
+        $this->json([
+            'id' => $this->id(),
+            'role' => 'assistant',
+            'content' => $result['content'],
+            'tokenUsage' => $result['tokenUsage'],
+            'harness' => [
+                'runtime' => 'langgraph-style-react-harness',
+                'nodes' => ['prepare', 'memory', 'retrieve', 'skills', 'tools', 'react', 'model', 'audit'],
+                'knowledgeCount' => count($resources['knowledge']),
+                'skillCount' => count($resources['skills']),
+                'toolCount' => count($resources['tools']),
+                'memoryCount' => count($resources['memory']),
+            ],
+        ]);
+    }
+
     private function callChatModel(array $messages, string $requestedModel = ''): array
     {
         $availableModels = $this->models(true);
@@ -369,8 +404,9 @@ final class ApiController
                 continue;
             }
 
+            $role = (string)($message['role'] ?? 'user');
             $normalized[] = [
-                'role' => ($message['role'] ?? '') === 'assistant' ? 'assistant' : 'user',
+                'role' => in_array($role, ['system', 'assistant', 'user'], true) ? $role : 'user',
                 'content' => $this->normalizeMessageContent($message['content'] ?? ''),
             ];
         }
@@ -403,6 +439,220 @@ final class ApiController
         }
 
         return $parts ?: '';
+    }
+
+    private function agentResources(array $mentions, string $query, string $threadId): array
+    {
+        $knowledgeIds = $this->mentionIds($mentions, 'knowledge');
+        $toolIds = $this->mentionIds($mentions, 'tool');
+        $dataSourceIds = $this->mentionIds($mentions, 'datasource');
+        $toolRows = $this->selectedTools($toolIds);
+
+        return [
+            'knowledge' => $this->rankKnowledge($knowledgeIds, $query),
+            'tools' => $this->toolManifests($toolRows),
+            'skills' => $this->skillManifests($toolRows),
+            'dataSources' => $this->selectedDataSources($dataSourceIds),
+            'memory' => $this->agentMemory($threadId),
+            'mentions' => $mentions,
+        ];
+    }
+
+    private function mentionIds(array $mentions, string $type): array
+    {
+        $ids = [];
+        foreach ($mentions as $mention) {
+            if (!is_array($mention) || (string)($mention['type'] ?? '') !== $type) {
+                continue;
+            }
+            $id = (string)($mention['id'] ?? '');
+            if ($id !== '') {
+                $ids[] = $id;
+            }
+        }
+
+        return array_values(array_unique($ids));
+    }
+
+    private function rankKnowledge(array $knowledgeIds, string $query): array
+    {
+        $tokens = array_values(array_filter(preg_split('/\s+/u', strtolower($query)) ?: []));
+        $documents = $this->store->all('documents');
+        if ($knowledgeIds) {
+            $documents = array_values(array_filter($documents, fn ($row) => in_array((string)($row['knowledgeBaseId'] ?? ''), $knowledgeIds, true)));
+        }
+
+        $ranked = [];
+        foreach ($documents as $row) {
+            $content = (string)($row['content'] ?? $row['parsedContent'] ?? $row['text'] ?? '');
+            if ($content === '') {
+                continue;
+            }
+
+            $haystack = strtolower((string)($row['name'] ?? '') . "\n" . $content);
+            $score = 0;
+            foreach ($tokens as $token) {
+                if ($token !== '' && str_contains($haystack, $token)) {
+                    $score++;
+                }
+            }
+
+            $ranked[] = [
+                'score' => $score,
+                'title' => (string)($row['name'] ?? 'Document'),
+                'knowledgeBaseId' => (string)($row['knowledgeBaseId'] ?? ''),
+                'content' => $this->slice($content, 0, 1800),
+            ];
+        }
+
+        usort($ranked, fn ($a, $b) => ($b['score'] <=> $a['score']));
+        return array_slice($ranked, 0, 6);
+    }
+
+    private function selectedTools(array $toolIds): array
+    {
+        $tools = array_values(array_filter($this->store->all('tools'), fn ($row) => (bool)($row['isActive'] ?? true)));
+        if (!$toolIds) {
+            return $tools;
+        }
+
+        return array_values(array_filter($tools, fn ($row) => in_array((string)($row['id'] ?? ''), $toolIds, true)));
+    }
+
+    private function toolManifests(array $tools): array
+    {
+        return array_map(function ($tool) {
+            $config = is_array($tool['configData'] ?? null) ? $tool['configData'] : [];
+            return [
+                'id' => (string)($tool['id'] ?? ''),
+                'name' => (string)($tool['name'] ?? 'Tool'),
+                'type' => (string)($tool['type'] ?? 'mcp'),
+                'description' => (string)($tool['description'] ?? ''),
+                'callPolicy' => $this->toolCallPolicy((string)($tool['type'] ?? 'mcp'), $config),
+            ];
+        }, $tools);
+    }
+
+    private function skillManifests(array $tools): array
+    {
+        $skills = [];
+        foreach ($tools as $tool) {
+            if ((string)($tool['type'] ?? '') !== 'skill') {
+                continue;
+            }
+
+            $skill = is_array($tool['skill'] ?? null) ? $tool['skill'] : (is_array($tool['skillData'] ?? null) ? $tool['skillData'] : []);
+            $skills[] = [
+                'id' => (string)($tool['id'] ?? ''),
+                'name' => (string)($tool['name'] ?? $skill['name'] ?? 'Skill'),
+                'description' => (string)($tool['description'] ?? $skill['description'] ?? ''),
+                'content' => $this->slice((string)($skill['content'] ?? $skill['prompt'] ?? ''), 0, 5000),
+            ];
+        }
+
+        return $skills;
+    }
+
+    private function selectedDataSources(array $dataSourceIds): array
+    {
+        $rows = $this->store->all('dataSources');
+        if ($dataSourceIds) {
+            $rows = array_values(array_filter($rows, fn ($row) => in_array((string)($row['id'] ?? ''), $dataSourceIds, true)));
+        }
+
+        return array_map(fn ($row) => [
+            'id' => (string)($row['id'] ?? ''),
+            'name' => (string)($row['name'] ?? 'Data Source'),
+            'type' => (string)($row['type'] ?? ''),
+            'description' => (string)($row['description'] ?? ''),
+            'syncStatus' => (string)($row['syncStatus'] ?? ''),
+            'recordCount' => (int)($row['recordCount'] ?? 0),
+        ], $rows);
+    }
+
+    private function agentMemory(string $threadId): array
+    {
+        $memory = $this->store->meta('agentMemory') ?: [];
+        $rows = is_array($memory[$threadId] ?? null) ? $memory[$threadId] : [];
+        return array_slice($rows, -8);
+    }
+
+    private function rememberAgentTurn(string $threadId, string $query, string $answer): void
+    {
+        $memory = $this->store->meta('agentMemory') ?: [];
+        $rows = is_array($memory[$threadId] ?? null) ? $memory[$threadId] : [];
+        $rows[] = ['role' => 'user', 'content' => $this->slice($query, 0, 1200), 'at' => $this->now()];
+        $rows[] = ['role' => 'assistant', 'content' => $this->slice($answer, 0, 1600), 'at' => $this->now()];
+        $memory[$threadId] = array_slice($rows, -20);
+        $this->store->setMeta('agentMemory', $memory);
+    }
+
+    private function toolCallPolicy(string $type, array $config): string
+    {
+        if ($type === 'skill') {
+            return 'Apply as an internal skill instruction before answering.';
+        }
+        if (trim((string)($config['url'] ?? $config['endpoint'] ?? '')) !== '') {
+            return 'Callable through configured HTTP endpoint; never invent results, state when execution is unavailable.';
+        }
+
+        return 'Available as a declared tool manifest; request explicit user confirmation before irreversible or paid actions.';
+    }
+
+    private function agentSystemPrompt(array $resources, string $threadId): string
+    {
+        return implode("\n\n", [
+            'You are the universal assistant running in a LangGraph-style ReAct state graph.',
+            'Architecture contract: prepare -> memory -> retrieve -> skills -> tools -> react -> model -> audit.',
+            'Harness constraints: clarify the user goal when needed; prefer cited local knowledge over guesses; use memory only when relevant; apply skills as operating procedures; use tool manifests to decide possible actions; never fabricate tool outputs; ask before irreversible, external, or paid actions; answer in Chinese unless the user requests another language.',
+            'Reason privately. Do not expose hidden chain-of-thought. When useful, show a concise public plan, key evidence, and final answer.',
+            'Thread ID: ' . $threadId,
+            'Memory:' . "\n" . $this->formatContext($resources['memory']),
+            'Knowledge:' . "\n" . $this->formatContext($resources['knowledge']),
+            'Skills:' . "\n" . $this->formatContext($resources['skills']),
+            'Tool Manifest:' . "\n" . $this->formatContext($resources['tools']),
+            'Data Sources:' . "\n" . $this->formatContext($resources['dataSources']),
+        ]);
+    }
+
+    private function formatContext(array $items): string
+    {
+        if (!$items) {
+            return 'none';
+        }
+
+        return implode("\n", array_map(fn ($item) => '- ' . $this->slice(json_encode($item, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: '{}', 0, 2500), $items));
+    }
+
+    private function lastUserMessage(array $messages): string
+    {
+        for ($i = count($messages) - 1; $i >= 0; $i--) {
+            $message = $messages[$i];
+            if (is_array($message) && (string)($message['role'] ?? '') === 'user') {
+                return $this->messageText($message['content'] ?? '');
+            }
+        }
+
+        return '';
+    }
+
+    private function messageText(mixed $content): string
+    {
+        if (is_string($content)) {
+            return $content;
+        }
+        if (!is_array($content)) {
+            return (string)$content;
+        }
+
+        $parts = [];
+        foreach ($content as $part) {
+            if (is_array($part) && ($part['type'] ?? '') === 'text') {
+                $parts[] = (string)($part['text'] ?? '');
+            }
+        }
+
+        return trim(implode("\n", $parts));
     }
 
     private function httpJson(string $method, string $url, array $body = [], array $headers = [], bool $sendBody = true): array
